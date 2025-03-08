@@ -167,3 +167,15 @@ func getWatchNamespace() (string, error) {
 	}
 	return ns, nil
 }
+
+// getWatchNamespaceSelector returns the namespace list the operator should be watching for changes
+func getWatchNamespaceSelector() ([]string, error) {
+	// WatchNamespaceSelectorEnvVar is the constant for env variable WATCH_NAMESPACE_SELECTOR which specifies the namespace list to watch.
+	var watchNamespaceSelectorEnvVar = "WATCH_NAMESPACE_SELECTOR"
+
+	nsList, found := os.LookupEnv(watchNamespaceSelectorEnvVar)
+	if !found {
+		return []string{}, fmt.Errorf("%s must be set", watchNamespaceSelectorEnvVar)
+	}
+	return strings.Split(ns, ","), nil
+}

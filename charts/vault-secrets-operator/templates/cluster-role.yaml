@@ -18,4 +18,12 @@ rules:
     - subjectaccessreviews
     verbs:
     - create
+{{- if .Values.vault.namespaceSelector }}
+  - apiGroups:
+      - ""
+    resources:
+      - namespaces
+    verbs:
+      - get
+{{- end }}
 {{ end }}
