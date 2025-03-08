@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"net/http"
@@ -14,6 +15,8 @@ import (
 
 	// +kubebuilder:scaffold:imports
 
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
@@ -21,6 +24,7 @@ import (
 	"k8s.io/client-go/rest"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	webhookserver "sigs.k8s.io/controller-runtime/pkg/webhook"
@@ -42,9 +46,12 @@ func main() {
 	var metricsAddr string
 	var probeAddr string
 	var enableLeaderElection bool
+	var namespaceSelector string
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "The address the metric endpoint binds to.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
 	flag.BoolVar(&enableLeaderElection, "leader-elect", false, "Enable leader election for controller manager. Enabling this will ensure there is only one active controller manager.")
+	flag.StringVar(&namespaceSelector, "namespace-selector", "", "A comma-separated list of key:value labels to filter on for namespaces")
+
 	opts := zap.Options{
 		Development: false,
 	}
@@ -67,6 +74,34 @@ func main() {
 		} else {
 			ctrl.Log.Info("Shared client wasn't initialized, each secret must be use the vaultRole property")
 		}
+	}
+
+	// Convert namespaceSelector string to label selector
+	labelMap := make(map[string]string)
+	if namespaceSelector != "" {
+		for _, kv := range strings.Split(namespaceSelector, ",") {
+			parts := strings.SplitN(kv, ":", 2)
+			if len(parts) == 2 {
+				labelMap[parts[0]] = parts[1]
+			} else {
+				fmt.Println("Invalid namespace selector format. Use key:value")
+				os.Exit(1)
+			}
+		}
+	}
+
+	cfg := ctrl.GetConfigOrDie()
+	cl, err := client.New(cfg, client.Options{Scheme: scheme})
+	if err != nil {
+		fmt.Println("Unable to create client:", err)
+		os.Exit(1)
+	}
+	labelSelector := labels.SelectorFromSet(labelMap)
+	nsList := &corev1.NamespaceList{}
+	err = cl.List(context.Background(), nsList, &client.ListOptions{LabelSelector: labelSelector})
+	if err != nil {
+		fmt.Println("Error listing namespaces:", err)
+		os.Exit(1)
 	}
 
 	watchNamespace, err := getWatchNamespace()

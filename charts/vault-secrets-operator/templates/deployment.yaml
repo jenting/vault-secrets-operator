@@ -70,6 +70,10 @@ spec:
             {{- else }}
               value: ""
             {{- end }}
+            {{- if .Values.vault.namespaceSelector }}
+            - name: WATCH_NAMESPACE_SELECTOR
+              value: {{ .Values.vault.namespaceSelector | quote }}
+            {{- end }}
             {{- if .Values.vault.address }}
             - name: VAULT_ADDRESS
               value: {{ .Values.vault.address | quote }}

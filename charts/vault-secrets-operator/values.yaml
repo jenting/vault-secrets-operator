@@ -96,6 +96,7 @@ vault:
   gcpRole: vault-secrets-operator
   reconciliationTime: 0
   namespaces: ""
+  namespaceSelector: ""
 
 rbac:
   create: true
