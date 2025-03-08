@@ -160,10 +160,15 @@ func getWatchNamespace() (string, error) {
 	// WatchNamespaceEnvVar is the constant for env variable WATCH_NAMESPACE which specifies the Namespace to watch.
 	// An empty value means the operator is running with cluster scope.
 	var watchNamespaceEnvVar = "WATCH_NAMESPACE"
+	var watchNamespaceLabelSelectorEnvVar = "WATCH_NAMESPACE_LABEL_SELECTOR"
 
 	ns, found := os.LookupEnv(watchNamespaceEnvVar)
 	if !found {
-		return "", fmt.Errorf("%s must be set", watchNamespaceEnvVar)
+		labelSelector, found := os.LookupEnv(watchNamespaceLabelSelectorEnvVar)
+		if !found {
+			return "", fmt.Errorf("%s or %s must be set", watchNamespaceEnvVar, watchNamespaceLabelSelectorEnvVar)
+		}
+		return labelSelector, nil
 	}
 	return ns, nil
 }

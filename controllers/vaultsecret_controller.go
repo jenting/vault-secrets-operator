@@ -303,11 +303,41 @@ func ignorePredicate() predicate.Predicate {
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *VaultSecretReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	labelSelector, err := getNamespaceLabelSelector()
+	if err != nil {
+		return err
+	}
+
+	options := ctrl.Options{
+		Scheme: mgr.GetScheme(),
+	}
+
+	if labelSelector != "" {
+		options.Namespace = ""
+		options.NewCache = cache.BuilderWithOptions(cache.Options{
+			SelectorsByObject: cache.SelectorsByObject{
+				&corev1.Namespace{}: {
+					Label: labels.SelectorFromSet(labels.Set{
+						"foo": "bar",
+					}),
+				},
+			},
+		})
+	}
+
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&ricobergerdev1alpha1.VaultSecret{}).
 		Owns(&corev1.Secret{}).
 		WithEventFilter(ignorePredicate()).
 		Complete(r)
+}
+
+func getNamespaceLabelSelector() (string, error) {
+	labelSelector, found := os.LookupEnv("WATCH_NAMESPACE_LABEL_SELECTOR")
+	if !found {
+		return "", fmt.Errorf("WATCH_NAMESPACE_LABEL_SELECTOR environment variable not set")
+	}
+	return labelSelector, nil
 }
 
 // Context provided to the templating engine
