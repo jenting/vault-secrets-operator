@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"net/http"
@@ -21,10 +22,20 @@ import (
 	"k8s.io/client-go/rest"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	webhookserver "sigs.k8s.io/controller-runtime/pkg/webhook"
 )
+
+// noMatchingNamespace is a placeholder namespace name used to keep the cache
+// namespace-scoped when the configuration currently matches no namespace.
+// controller-runtime treats an empty cache.DefaultNamespaces map as
+// cluster-wide (it only builds a scoped cache when len > 0), so without a
+// placeholder a selector matching nothing would accidentally watch every
+// namespace. This name is very unlikely to exist; the NamespaceWatcher restarts
+// the operator as soon as a real namespace matches.
+const noMatchingNamespace = "vault-secrets-operator-no-matching-namespace"
 
 var (
 	scheme   = runtime.NewScheme()
@@ -74,6 +85,27 @@ func main() {
 		setupLog.Error(err, "unable to get WatchNamespace, the manager will watch and manage resources in all namespaces")
 	}
 
+	labelSelector := os.Getenv("WATCH_NAMESPACE_LABEL_SELECTOR")
+
+	// Normalize the comma-separated namespace list (e.g. "ns1, ns2").
+	space := regexp.MustCompile(`\s+`)
+	var namespaceList []string
+	if watchNamespace != "" {
+		for _, ns := range strings.Split(space.ReplaceAllString(watchNamespace, ""), ",") {
+			if ns != "" {
+				namespaceList = append(namespaceList, ns)
+			}
+		}
+	}
+
+	nsFilter, err := controller.NewNamespaceFilter(namespaceList, labelSelector)
+	if err != nil {
+		setupLog.Error(err, "invalid WATCH_NAMESPACE_LABEL_SELECTOR")
+		os.Exit(1)
+	}
+
+	restConfig := ctrl.GetConfigOrDie()
+
 	options := ctrl.Options{
 		Scheme: scheme,
 		Metrics: metricsserver.Options{
@@ -87,29 +119,15 @@ func main() {
 		LeaderElectionID:       "vaultsecretsoperator.ricoberger.de",
 	}
 
-	// Add support for MultiNamespace set in WATCH_NAMESPACE (e.g ns1,ns2)
-	if watchNamespace != "" {
-		setupLog.Info("manager set up with multiple namespaces", "namespaces", watchNamespace)
-
-		// remove whitespaces (e.g. WATCH_NAMESPACE=ns1, ns2)
-		space := regexp.MustCompile(`\s+`)
-		watchNamespace = space.ReplaceAllString(watchNamespace, "")
-
-		// split namespaces and setup cache
-		namespaces := make(map[string]cache.Config)
-		watchNamespaces := strings.SplitSeq(watchNamespace, ",")
-
-		for ns := range watchNamespaces {
-			namespaces[ns] = cache.Config{}
-		}
-
-		options.NewCache = func(config *rest.Config, opts cache.Options) (cache.Cache, error) {
-			opts.DefaultNamespaces = namespaces
-			return cache.New(config, opts)
-		}
+	// Scope the cache to the namespaces to watch (keeps it namespace-scoped for
+	// low memory). watchedNamespaces also seeds the NamespaceWatcher below.
+	watchedNamespaces, err := scopeCacheToNamespaces(restConfig, nsFilter, &options)
+	if err != nil {
+		setupLog.Error(err, "unable to scope cache to watched namespaces")
+		os.Exit(1)
 	}
 
-	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), options)
+	mgr, err := ctrl.NewManager(restConfig, options)
 	if err != nil {
 		setupLog.Error(err, "unable to start manager")
 		os.Exit(1)
@@ -148,11 +166,65 @@ func main() {
 		os.Exit(1)
 	}
 
+	// A cancelable context so the NamespaceWatcher can trigger a graceful
+	// shutdown (and exit) when the watched namespace set changes.
+	ctx, cancel := context.WithCancel(ctrl.SetupSignalHandler())
+	defer cancel()
+
+	if nsFilter.UsesLabelSelector() {
+		if err = (&controller.NamespaceWatcher{
+			Client:   mgr.GetClient(),
+			Filter:   nsFilter,
+			Watched:  watchedNamespaces,
+			OnChange: cancel,
+		}).SetupWithManager(mgr); err != nil {
+			setupLog.Error(err, "unable to create controller", "controller", "NamespaceWatcher")
+			os.Exit(1)
+		}
+	}
+
 	setupLog.Info("starting manager")
-	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
+	if err := mgr.Start(ctx); err != nil {
 		setupLog.Error(err, "problem running manager")
 		os.Exit(1)
 	}
+}
+
+// scopeCacheToNamespaces resolves the namespaces to watch (explicit
+// WATCH_NAMESPACE names unioned with label-matched namespaces) and scopes the
+// manager cache to them via DefaultNamespaces, keeping the cache
+// namespace-scoped for low memory. It returns the resolved set, which seeds the
+// NamespaceWatcher. When nothing matches yet it scopes to noMatchingNamespace.
+func scopeCacheToNamespaces(restConfig *rest.Config, filter *controller.NamespaceFilter, options *ctrl.Options) (map[string]struct{}, error) {
+	if !filter.Enabled() {
+		return nil, nil
+	}
+
+	directClient, err := client.New(restConfig, client.Options{Scheme: scheme})
+	if err != nil {
+		return nil, err
+	}
+	watched, err := filter.WatchedNamespaces(context.Background(), directClient)
+	if err != nil {
+		return nil, err
+	}
+
+	namespaces := make(map[string]cache.Config, len(watched))
+	for ns := range watched {
+		namespaces[ns] = cache.Config{}
+	}
+	if len(namespaces) == 0 {
+		setupLog.Info("no namespace matches the configuration yet, watching nothing until one appears")
+		namespaces[noMatchingNamespace] = cache.Config{}
+	} else {
+		setupLog.Info("manager set up with namespace-scoped cache", "namespaceCount", len(namespaces))
+	}
+
+	options.NewCache = func(config *rest.Config, opts cache.Options) (cache.Cache, error) {
+		opts.DefaultNamespaces = namespaces
+		return cache.New(config, opts)
+	}
+	return watched, nil
 }
 
 // getWatchNamespace returns the Namespace the operator should be watching for
